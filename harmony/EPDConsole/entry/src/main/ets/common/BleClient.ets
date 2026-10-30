@@ -37,7 +37,6 @@ export class BleClient {
   private heartbeatFails: number = 0;
   private transferring: boolean = false;
   private protocolReady: boolean = false;
-  private linkFatal: boolean = false;
   public state: string = ConnState.EXIT;
 
   public appVersion: number = 0x15;
@@ -204,7 +203,6 @@ export class BleClient {
     this.protocolReady = false;
     this.transferring = false;
     this.heartbeatFails = 0;
-    this.linkFatal = false;
     this.linkWaiter = null;
     let lastMsg: string = '';
     for (let attempt: number = 1; attempt <= this.connectRetries; attempt++) {
@@ -265,13 +263,19 @@ export class BleClient {
         await this.withTimeout<void>(dev.setCharacteristicChangeNotification(this.dataChar, true), 5000);
         this.state = ConnState.HOLD;
         if (this.protocolReady) {
-          const ok: boolean = await this.setLinkState(LinkState.HOLD, LINK_ACK_MS);
+          let ok: boolean = await this.setLinkState(LinkState.HOLD, LINK_ACK_MS);
           if (!ok) {
-            this.linkFatal = true;
-            throw new Error('设备未确认连接保持状态（无回复）');
+            await this.delay(250);
+            ok = await this.setLinkState(LinkState.HOLD, LINK_ACK_MS);
           }
-          this.onLog('链路状态：HOLD（连接保持）');
-          this.startHeartbeat();
+          if (ok) {
+            this.onLog('链路状态：HOLD（连接保持）');
+            this.startHeartbeat();
+          } else {
+            // 链路状态握手失败不应阻断连接；退回兼容模式，保持可用。
+            this.protocolReady = false;
+            this.onLog('HOLD 未确认，进入兼容模式（保持连接，不启用心跳）');
+          }
         }
         this.startIdleTimer();
         this.onLog('连接保持：已就绪');
@@ -281,9 +285,6 @@ export class BleClient {
         this.onLog('连接失败(第' + attempt + '/' + this.connectRetries + '次): ' + lastMsg);
         this.stopHeartbeat();
         this.releaseDevice(dev);
-        if (this.linkFatal) {
-          break;
-        }
         if (attempt < this.connectRetries) {
           await this.delay(1200);
         }
@@ -396,13 +397,11 @@ export class BleClient {
     this.heartbeatFails = 0;
     const ok: boolean = await this.setLinkState(LinkState.TRANSFER, LINK_ACK_MS + 1000);
     if (!ok) {
-      this.transferring = false;
-      this.onLog('设备未确认 TRANSFER 状态（无回复），断开连接');
-      this.disconnect('设备无回复');
-      this.onDisconnected('no-reply');
-      throw new Error('设备未响应传输状态');
+      // 不因状态码 ACK 丢失而断开；实际图片块 ACK 仍会验证链路。
+      this.onLog('TRANSFER 未确认，继续传输（不影响连接）');
+    } else {
+      this.onLog('链路状态：TRANSFER（传输中）');
     }
-    this.onLog('链路状态：TRANSFER（传输中）');
   }
 
   async endTransfer(): Promise<void> {
