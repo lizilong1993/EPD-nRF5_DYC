@@ -3,6 +3,7 @@ import { promptAction, router, window } from '@kit.ArkUI';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { common } from '@kit.AbilityKit';
 import { DfuClient, DfuScanResult, EPD_SERVICE_UUID, DFU_SERVICE_UUID, DFU_ADV_NAME } from '../common/DfuClient';
+import { BleClient } from '../common/BleClient';
 import { FirmwarePackage, loadFirmwarePackage } from '../common/FirmwarePackage';
 
 @Entry
@@ -158,7 +159,7 @@ struct Firmware {
         this.log('检测到设备已在 DFU 模式（' + pre[0].name + '）');
       } else {
         this.status = '扫描墨水屏...';
-        const list: DfuScanResult[] = await client.scan(EPD_SERVICE_UUID, 8000);
+        const list: DfuScanResult[] = await client.scan(EPD_SERVICE_UUID, 70000);
         let target: DfuScanResult | null = null;
         for (let i: number = 0; i < list.length; i++) {
           if (list[i].name.indexOf('NRF_EPD') >= 0) {
@@ -167,7 +168,7 @@ struct Firmware {
           }
         }
         if (target === null) {
-          throw new Error('未扫描到 NRF_EPD。设备已停止广播，请断电重启（拔一颗 CR2450 再装回）后重试');
+          throw new Error('未在 70 秒内扫描到 NRF_EPD。请确认设备已上电；相册模式下每 60 秒广播约 2 秒，可重试');
         }
         this.log('连接 ' + target.name + ' (' + target.deviceId + ')');
         await client.connect(target.deviceId);
@@ -213,19 +214,39 @@ struct Firmware {
       client.disconnect();
       this.inBootloader = false;
       let back: boolean = false;
-      for (let round: number = 0; round < 4 && !back; round++) {
+      let appDeviceId: string = '';
+      for (let round: number = 0; round < 2 && !back; round++) {
         await this.delay(1200);
-        const apps: DfuScanResult[] = await client.scan(EPD_SERVICE_UUID, 3500);
+        const apps: DfuScanResult[] = await client.scan(EPD_SERVICE_UUID, 70000);
         for (let i: number = 0; i < apps.length; i++) {
           if (apps[i].name.indexOf('NRF_EPD') >= 0) {
             back = true;
+            appDeviceId = apps[i].deviceId;
             break;
           }
         }
       }
       if (back) {
-        this.status = '升级完成，设备已重启';
-        this.log('升级完成：已重新扫描到 NRF_EPD');
+        this.status = '设备已重新广播，正在验证连接...';
+        const verify = new BleClient();
+        verify.onLog = (m: string): void => {
+          this.log('验证: ' + m);
+        };
+        try {
+          await verify.connect(appDeviceId);
+          if (verify.appVersion === pkg.init.fwVersion) {
+            this.status = '升级完成：已连接，版本 0x' + verify.appVersion.toString(16);
+            this.log('升级验证通过：连接成功，版本 0x' + verify.appVersion.toString(16));
+          } else {
+            this.status = '设备已连接，但版本 0x' + verify.appVersion.toString(16) +
+              ' 与包内 0x' + pkg.init.fwVersion.toString(16) + ' 不一致';
+            this.log('升级验证：版本不一致');
+          }
+          await verify.disconnectGracefully('升级验证完成');
+        } catch (e) {
+          this.status = '设备已重新广播，但连接验证失败：' + (e as Error).message;
+          this.log('升级验证失败：' + (e as Error).message);
+        }
       } else {
         this.status = '传输完成；未检测到设备重新广播，请手动重连确认';
         this.log('未在等待窗口内扫描到 NRF_EPD，请在连接页重新扫描');

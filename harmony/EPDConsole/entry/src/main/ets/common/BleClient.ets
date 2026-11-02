@@ -28,6 +28,8 @@ export class BleClient {
   private versionChar: ble.BLECharacteristic | null = null;
   private statusWaiter: ((status: TransferStatus) => void) | null = null;
   private scanCallback: ((results: Array<ble.ScanResult>) => void) | null = null;
+  private scanPhaseTimer: number = -1;
+  private scanEndTimer: number = -1;
   private idleTimer: number = -1;
   private idleTimeoutMs: number = 120000;
   private connectRetries: number = 3;
@@ -88,6 +90,7 @@ export class BleClient {
       onFound(list);
     };
     this.scanCallback = cb;
+    const scanOptions: ble.ScanOptions = { dutyMode: ble.ScanDuty.SCAN_MODE_LOW_LATENCY };
     try {
       ble.on('BLEDeviceFind', cb);
       // 两阶段扫描：先用 EPD 服务/名称过滤（HarmonyOS 7 对空过滤器支持不稳定，
@@ -98,24 +101,24 @@ export class BleClient {
         { name: 'NRF_EPD' }
       ];
       try {
-        ble.startBLEScan(epdFilters);
+        ble.startBLEScan(epdFilters, scanOptions);
         this.onLog('扫描阶段1：EPD 服务/名称过滤');
       } catch (e1) {
         this.onLog('服务过滤扫描不支持，阶段1改为全量');
-        ble.startBLEScan([{}]);
+        ble.startBLEScan([{}], scanOptions);
       }
-      setTimeout(() => {
+      this.scanPhaseTimer = setTimeout(() => {
         try {
           ble.stopBLEScan();
         } catch (e2) {
         }
         try {
-          ble.startBLEScan([{}]);
+          ble.startBLEScan([{}], scanOptions);
           this.onLog('扫描阶段2：全量扫描');
         } catch (e3) {
         }
       }, phase1);
-      setTimeout(() => {
+      this.scanEndTimer = setTimeout(() => {
         this.stopScan();
       }, durationMs);
     } catch (err) {
@@ -125,6 +128,14 @@ export class BleClient {
   }
 
   stopScan(): void {
+    if (this.scanPhaseTimer >= 0) {
+      clearTimeout(this.scanPhaseTimer);
+      this.scanPhaseTimer = -1;
+    }
+    if (this.scanEndTimer >= 0) {
+      clearTimeout(this.scanEndTimer);
+      this.scanEndTimer = -1;
+    }
     try {
       ble.stopBLEScan();
     } catch (err) {
@@ -223,7 +234,8 @@ export class BleClient {
         }
       });
       try {
-        await this.waitConnected(dev, 9000);
+        this.onLog('等待设备广播窗口（最长 75 秒）...');
+        await this.waitConnected(dev, 75000);
         this.onLog('GATT 已连接，开始服务发现');
         const services: Array<ble.GattService> = await this.withTimeout<Array<ble.GattService>>(dev.getServices(), 8000);
         let service: ble.GattService | null = null;

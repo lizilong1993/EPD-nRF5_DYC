@@ -18,6 +18,7 @@ const OP_CHECKSUM: number = 0x03;
 const OP_EXECUTE: number = 0x04;
 const OP_SELECT: number = 0x06;
 const OP_RESPONSE: number = 0x60;
+const BUTTONLESS_RESPONSE: number = 0x20;
 const RESULT_SUCCESS: number = 0x01;
 const RESULT_EXT_ERROR: number = 0x0B;
 const OBJECT_MAX: number = 4096;
@@ -120,12 +121,13 @@ export class DfuClient {
       filters.push({ name: name });
     }
     if (filters.length === 0) {
-      this.onLog('扫描需要至少一个过滤条件');
-      return [];
+      this.scanCb = null;
+      throw new Error('扫描需要至少一个过滤条件');
     }
     try {
+      const scanOptions: ble.ScanOptions = { dutyMode: ble.ScanDuty.SCAN_MODE_LOW_LATENCY };
       ble.on('BLEDeviceFind', cb);
-      ble.startBLEScan(filters);
+      ble.startBLEScan(filters, scanOptions);
     } catch (err) {
       this.onLog('扫描启动失败: ' + (err as Error).message);
       return [];
@@ -264,7 +266,7 @@ export class DfuClient {
         this.onDisconnected();
       }
     });
-    const connected = this.waitConnected(10000);
+    const connected = this.waitConnected(75000);
     dev.connect();
     await connected;
     await this.discover(dev);
@@ -366,7 +368,7 @@ export class DfuClient {
     }
     this.onLog('buttonless 事件 ' + d.length + ' 字节: ' + hex);
     // 忽略 CCCD 配置等非 DFU 响应，只接受 0x20 op result
-    if (d.length < 3 || d[0] !== OP_RESPONSE) {
+    if (d.length < 3 || d[0] !== BUTTONLESS_RESPONSE) {
       return;
     }
     if (this.indicationWaiter !== null) {
@@ -448,7 +450,7 @@ export class DfuClient {
       this.onLog('未收到 indication 响应（连接已断开或超时），继续尝试扫描 DfuTarg');
       return;
     }
-    if (resp.length < 3 || resp[0] !== OP_RESPONSE || resp[1] !== 0x01) {
+    if (resp.length < 3 || resp[0] !== BUTTONLESS_RESPONSE || resp[1] !== 0x01) {
       throw new Error('buttonless 响应格式错误');
     }
     if (resp[2] !== RESULT_SUCCESS) {
@@ -642,7 +644,8 @@ export class DfuClient {
         const objStart: number = pos - (pos % chunk);
         const end: number = Math.min(bytes.length, objStart + chunk);
         this.onLog('续传当前未完成对象：' + pos + ' → ' + end);
-        await this.sendChunk(type, bytes, pos, end, chunk, false);
+        const isLast: boolean = (type === 2 && base + end >= total);
+        await this.sendChunk(type, bytes, pos, end, chunk, isLast);
         pos = end;
       } else {
         this.onLog('断点在对象边界，先补发 EXECUTE（幂等）再重新读取进度');

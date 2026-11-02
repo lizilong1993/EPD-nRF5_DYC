@@ -341,7 +341,7 @@ export class ProcessOptions {
   brightness: number = 0.0;
   gamma: number = 1.0;
   saturation: number = 1.0;
-  redSensitivity: number = 0.45;
+  redSensitivity: number = 0.35;
   serpentine: boolean = true;
 }
 
@@ -364,6 +364,23 @@ function applyTone(v: number, opt: ProcessOptions): number {
   const gray: number = 0.299 * x + 0.587 * x + 0.114 * x;
   x = gray + (x - gray) * opt.saturation;
   return Math.min(255, Math.max(0, x));
+}
+
+// Keep the Web contrast path byte-identical with neutral brightness/gamma/saturation.
+export function applyImageTone(data: Uint8ClampedArray, opt: ProcessOptions): void {
+  if (opt.brightness === 0 && opt.gamma === 1 && opt.saturation === 1) {
+    adjustContrast(data, opt.contrast);
+    return;
+  }
+  for (let i: number = 0; i < data.length; i += 4) {
+    const r: number = applyTone(data[i], opt);
+    const g: number = applyTone(data[i + 1], opt);
+    const b: number = applyTone(data[i + 2], opt);
+    const gray: number = 0.299 * r + 0.587 * g + 0.114 * b;
+    data[i] = gray + (r - gray) * opt.saturation;
+    data[i + 1] = gray + (g - gray) * opt.saturation;
+    data[i + 2] = gray + (b - gray) * opt.saturation;
+  }
 }
 
 function luminanceLinear(r: number, g: number, b: number): number {
@@ -394,7 +411,8 @@ function redScore(r: number, g: number, b: number): number {
   }
   const hueDist: number = Math.min(hue, 360 - hue);
   const hueWeight: number = Math.max(0, 1 - hueDist / 45);
-  return sat * hueWeight * (max / 255);
+  // 红色应按色相/饱和度判定；乘 max/255 会把照片里中等偏暗的红色全部丢掉。
+  return sat * hueWeight;
 }
 
 function diffuseLum(lum: Float32Array, w: number, h: number, terms: KernelTerm[], divisor: number,

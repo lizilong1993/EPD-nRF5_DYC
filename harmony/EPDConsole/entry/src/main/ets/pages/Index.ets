@@ -7,7 +7,7 @@ import { abilityAccessCtrl, common, Permissions } from '@kit.AbilityKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { Cmd, frame, buildTimeData, hexToBytes, bytesToHex } from '../common/Protocol';
 import { BleClient, DeviceItem } from '../common/BleClient';
-import { processImage, ProcessOptions, convertUC8159 } from '../common/Dither';
+import { processImage, ProcessOptions, convertUC8159, applyImageTone, ditherImage, packImage } from '../common/Dither';
 import { RawImage, rotate90, mirrorH, mirrorV, fitToCanvas } from '../common/ImageOps';
 import { sendLayerCrc, sendLayerLegacy } from '../common/Transfer';
 
@@ -122,14 +122,13 @@ struct Index {
   @State brightnessValue: number = 0.0;
   @State gammaValue: number = 1.0;
   @State saturationValue: number = 1.0;
-  @State redSensitivity: number = 0.45;
+  @State redSensitivity: number = 0.35;
   @State autoDisconnect: boolean = false;
   @State manualOverride: boolean = false;
   @State frameW: number = 0;
   @State frameH: number = 0;
   @State idleSec: number = 120;
   @State clearBeforeSend: boolean = true;
-  @State deepSleepAfterSend: boolean = false;
   @State cropMode: boolean = false;
   @State cropX: number = 0;
   @State cropY: number = 0;
@@ -153,6 +152,16 @@ struct Index {
   private lastDeviceName: string = '';
   private reconnecting: boolean = false;
   private deviceModelCode: string = '';
+
+  private toDisplayBuffer(src: ArrayBuffer): ArrayBuffer {
+    const copy = new Uint8ClampedArray(src.slice(0));
+    for (let i: number = 0; i + 2 < copy.length; i += 4) {
+      const r: number = copy[i];
+      copy[i] = copy[i + 2];
+      copy[i + 2] = r;
+    }
+    return copy.buffer as ArrayBuffer;
+  }
 
   aboutToAppear(): void {
     PersistentStorage.persistProp('lastDeviceId', '');
@@ -239,7 +248,7 @@ struct Index {
         pixelFormat: image.PixelMapFormat.RGBA_8888,
         editable: false
       };
-      this.srcPixelMap = await image.createPixelMap(buf.slice(0), srcOpts);
+      this.srcPixelMap = await image.createPixelMap(this.toDisplayBuffer(buf), srcOpts);
       await pm.release();
       await source.release();
       await this.rebuild();
@@ -329,6 +338,8 @@ struct Index {
   }
 
   aboutToDisappear(): void {
+    this.autoConnect = false;
+    this.client.stopScan();
     if (this.connected) {
       this.client.disconnectGracefully('应用退出');
       this.connected = false;
@@ -415,15 +426,15 @@ struct Index {
     }
     this.devices = [];
     this.scanning = true;
-    this.log('开始两阶段扫描 16 秒（服务过滤 + 全量）...');
+    this.log('开始扫描 70 秒（等待相册模式的广播窗口）...');
     this.client.startScan((list: DeviceItem[]): void => {
       this.allDevices = list;
       this.applyDeviceFilter();
-    }, 16000);
+    }, 70000);
     setTimeout(() => {
       this.scanning = false;
       this.log('扫描结束，发现 ' + this.devices.length + ' 个设备');
-    }, 16300);
+    }, 70300);
   }
 
   private async startAutoConnect(): Promise<void> {
@@ -437,9 +448,9 @@ struct Index {
       return;
     }
     this.autoConnect = true;
-    this.log('自动连接已开启：每 8 秒扫描一次，发现 NRF_EPD 即连接');
+    this.log('自动连接已开启：每 70 秒扫描一次，发现 NRF_EPD 即连接（相册模式窗口）');
     while (this.autoConnect && !this.connected) {
-      const list: DeviceItem[] = await this.client.scanOnce(8000);
+      const list: DeviceItem[] = await this.client.scanOnce(70000);
       let target: DeviceItem | null = null;
       for (let i: number = 0; i < list.length; i++) {
         if (list[i].name.indexOf('NRF_EPD') >= 0) {
@@ -470,7 +481,7 @@ struct Index {
     this.reconnecting = true;
     this.log('连接失效，尝试自动重连...');
     try {
-      const list: DeviceItem[] = await this.client.scanOnce(7000);
+      const list: DeviceItem[] = await this.client.scanOnce(70000);
       let target: DeviceItem | null = null;
       for (let i: number = 0; i < list.length; i++) {
         if (list[i].name.startsWith('NRF_EPD') || list[i].name === this.lastDeviceName) {
@@ -624,6 +635,7 @@ struct Index {
       const buffer = new ArrayBuffer(dw * dh * 4);
       await pixelMap.readPixelsToBuffer(buffer);
       this.srcImage = new RawImage(new Uint8ClampedArray(buffer), dw, dh);
+      // 预览显示缓冲：平台 PixelMap 按 BGR 解释，这里交换 R/B，保证预览颜色=最终效果。
       if (this.srcPixelMap !== undefined) {
         try {
           this.srcPixelMap.release();
@@ -635,7 +647,7 @@ struct Index {
         pixelFormat: image.PixelMapFormat.RGBA_8888,
         editable: false
       };
-      this.srcPixelMap = await image.createPixelMap(buffer.slice(0), srcOpts);
+      this.srcPixelMap = await image.createPixelMap(this.toDisplayBuffer(buffer), srcOpts);
       this.cropMode = false;
       this.rotateQuarter = 0;
       this.mirrorHFlag = false;
@@ -680,16 +692,30 @@ struct Index {
       return;
     }
     const work = new Uint8ClampedArray(this.baseImage.data);
-    const opt = new ProcessOptions();
-    opt.mode = COLOR_MODES[this.colorIndex];
-    opt.alg = DITHER_ALGS[this.ditherIndex];
-    opt.strength = this.strength;
-    opt.contrast = this.contrastValue;
-    opt.brightness = this.brightnessValue;
-    opt.gamma = this.gammaValue;
-    opt.saturation = this.saturationValue;
-    opt.redSensitivity = this.redSensitivity;
-    this.packed = processImage(work, this.canvasW, this.canvasH, opt);
+    const mode: string = COLOR_MODES[this.colorIndex];
+    if (mode === 'threeColor') {
+      // Web 参考路径（与 html/js/dithering.js 逐字节对拍）：RGB 误差扩散 +
+      // r>120 && r>1.5g && r>1.5b 的红色判定。
+      const opt = new ProcessOptions();
+      opt.contrast = this.contrastValue;
+      opt.brightness = this.brightnessValue;
+      opt.gamma = this.gammaValue;
+      opt.saturation = this.saturationValue;
+      applyImageTone(work, opt);
+      ditherImage(this.canvasW, this.canvasH, work, DITHER_ALGS[this.ditherIndex], this.strength, mode);
+      this.packed = packImage(work, this.canvasW, this.canvasH, mode);
+    } else {
+      const opt = new ProcessOptions();
+      opt.mode = mode;
+      opt.alg = DITHER_ALGS[this.ditherIndex];
+      opt.strength = this.strength;
+      opt.contrast = this.contrastValue;
+      opt.brightness = this.brightnessValue;
+      opt.gamma = this.gammaValue;
+      opt.saturation = this.saturationValue;
+      opt.redSensitivity = this.redSensitivity;
+      this.packed = processImage(work, this.canvasW, this.canvasH, opt);
+    }
     if (this.preview !== undefined) {
       try {
         await this.preview.release();
@@ -703,7 +729,7 @@ struct Index {
       editable: false
     };
     try {
-      this.preview = await image.createPixelMap(work.buffer as ArrayBuffer, initOpts);
+      this.preview = await image.createPixelMap(this.toDisplayBuffer(work.buffer as ArrayBuffer), initOpts);
     } catch (err) {
       this.log('预览生成失败');
     }
@@ -953,24 +979,12 @@ struct Index {
       this.log('图片发送完成');
       this.toast('图片发送完成');
       if (this.autoDisconnect) {
-        if (this.deepSleepAfterSend) {
-          try {
-            await this.client.write(frame(Cmd.SYS_SLEEP), true);
-            this.log('已发送深睡指令 0x92');
-          } catch (err) {
-            this.log('深睡指令发送失败（设备可能已休眠）');
-          }
-        }
         await new Promise<void>((resolve: () => void) => {
           setTimeout(() => {
             resolve();
           }, 800);
         });
-        if (this.deepSleepAfterSend) {
-          this.client.disconnect('发送后断开');
-        } else {
-          await this.client.disconnectGracefully('发送后断开');
-        }
+        await this.client.disconnectGracefully('发送后断开');
         this.connected = false;
         this.log('已自动断开连接以省电');
       }
@@ -1176,7 +1190,7 @@ struct Index {
         .height(this.devices.length > 0 ? 220 : 1)
 
         if (!this.connected && this.devices.length === 0 && !this.scanning) {
-          Text('设备为低功耗广播窗口模式：每 5 秒广播约 0.3 秒。请保持扫描 12 秒，并确保设备未被其他手机连接。')
+          Text('相册模式为低功耗广播窗口：每 60 秒广播约 2 秒。请保持扫描 70 秒，并确保设备未被其他手机连接。')
             .fontSize(11)
             .fontColor('#888888')
         }
@@ -1570,29 +1584,91 @@ struct Index {
 
         Row({ space: 8 }) {
           Text('强度').fontSize(13).width(40)
-          Slider({ value: this.strength, min: 0, max: 5, step: 0.1 })
-            .layoutWeight(1)
-            .onChange((value: number, mode: SliderChangeMode) => {
-              this.strength = value;
-              if (mode === SliderChangeMode.End && this.hasImage) {
-                this.process();
-              }
+          Button('−').type(ButtonType.Capsule).backgroundColor('#2563EB').fontColor(Color.White)
+            .width(36).height(30).fontSize(16)
+            .onClick(() => {
+              this.strength = Math.max(0, Math.min(5, Math.round((this.strength - 0.1) * 10) / 10));
+              if (this.hasImage) { this.process(); }
             })
-          Text(this.strength.toFixed(1)).fontSize(12).width(36)
+          Text(this.strength.toFixed(1)).fontSize(12).layoutWeight(1).textAlign(TextAlign.Center)
+          Button('+').type(ButtonType.Capsule).backgroundColor('#2563EB').fontColor(Color.White)
+            .width(36).height(30).fontSize(16)
+            .onClick(() => {
+              this.strength = Math.max(0, Math.min(5, Math.round((this.strength + 0.1) * 10) / 10));
+              if (this.hasImage) { this.process(); }
+            })
         }
         .width('100%')
 
         Row({ space: 8 }) {
           Text('对比').fontSize(13).width(40)
-          Slider({ value: this.contrastValue, min: 0.5, max: 2, step: 0.1 })
-            .layoutWeight(1)
-            .onChange((value: number, mode: SliderChangeMode) => {
-              this.contrastValue = value;
-              if (mode === SliderChangeMode.End && this.hasImage) {
-                this.process();
-              }
+          Button('−').type(ButtonType.Capsule).backgroundColor('#2563EB').fontColor(Color.White)
+            .width(36).height(30).fontSize(16)
+            .onClick(() => {
+              this.contrastValue = Math.max(0.5, Math.min(2, Math.round((this.contrastValue - 0.1) * 10) / 10));
+              if (this.hasImage) { this.process(); }
             })
-          Text(this.contrastValue.toFixed(1)).fontSize(12).width(36)
+          Text(this.contrastValue.toFixed(1)).fontSize(12).layoutWeight(1).textAlign(TextAlign.Center)
+          Button('+').type(ButtonType.Capsule).backgroundColor('#2563EB').fontColor(Color.White)
+            .width(36).height(30).fontSize(16)
+            .onClick(() => {
+              this.contrastValue = Math.max(0.5, Math.min(2, Math.round((this.contrastValue + 0.1) * 10) / 10));
+              if (this.hasImage) { this.process(); }
+            })
+        }
+        .width('100%')
+
+        Row({ space: 8 }) {
+          Text('亮度').fontSize(13).width(40)
+          Button('−').type(ButtonType.Capsule).backgroundColor('#2563EB').fontColor(Color.White)
+            .width(36).height(30).fontSize(16)
+            .onClick(() => {
+              this.brightnessValue = Math.max(-1, Math.min(1, Math.round((this.brightnessValue - 0.1) * 10) / 10));
+              if (this.hasImage) { this.process(); }
+            })
+          Text(this.brightnessValue.toFixed(1)).fontSize(12).layoutWeight(1).textAlign(TextAlign.Center)
+          Button('+').type(ButtonType.Capsule).backgroundColor('#2563EB').fontColor(Color.White)
+            .width(36).height(30).fontSize(16)
+            .onClick(() => {
+              this.brightnessValue = Math.max(-1, Math.min(1, Math.round((this.brightnessValue + 0.1) * 10) / 10));
+              if (this.hasImage) { this.process(); }
+            })
+        }
+        .width('100%')
+
+        Row({ space: 8 }) {
+          Text('伽马').fontSize(13).width(40)
+          Button('−').type(ButtonType.Capsule).backgroundColor('#2563EB').fontColor(Color.White)
+            .width(36).height(30).fontSize(16)
+            .onClick(() => {
+              this.gammaValue = Math.max(0.2, Math.min(3, Math.round((this.gammaValue - 0.1) * 10) / 10));
+              if (this.hasImage) { this.process(); }
+            })
+          Text(this.gammaValue.toFixed(1)).fontSize(12).layoutWeight(1).textAlign(TextAlign.Center)
+          Button('+').type(ButtonType.Capsule).backgroundColor('#2563EB').fontColor(Color.White)
+            .width(36).height(30).fontSize(16)
+            .onClick(() => {
+              this.gammaValue = Math.max(0.2, Math.min(3, Math.round((this.gammaValue + 0.1) * 10) / 10));
+              if (this.hasImage) { this.process(); }
+            })
+        }
+        .width('100%')
+
+        Row({ space: 8 }) {
+          Text('饱和').fontSize(13).width(40)
+          Button('−').type(ButtonType.Capsule).backgroundColor('#2563EB').fontColor(Color.White)
+            .width(36).height(30).fontSize(16)
+            .onClick(() => {
+              this.saturationValue = Math.max(0, Math.min(2, Math.round((this.saturationValue - 0.1) * 10) / 10));
+              if (this.hasImage) { this.process(); }
+            })
+          Text(this.saturationValue.toFixed(1)).fontSize(12).layoutWeight(1).textAlign(TextAlign.Center)
+          Button('+').type(ButtonType.Capsule).backgroundColor('#2563EB').fontColor(Color.White)
+            .width(36).height(30).fontSize(16)
+            .onClick(() => {
+              this.saturationValue = Math.max(0, Math.min(2, Math.round((this.saturationValue + 0.1) * 10) / 10));
+              if (this.hasImage) { this.process(); }
+            })
         }
         .width('100%')
 
@@ -1657,14 +1733,7 @@ struct Index {
               this.autoDisconnect = on;
             })
         }.width('100%')
-        Row() {
-          Text('断开前让设备深睡 (0x92)').fontSize(13).layoutWeight(1)
-          Toggle({ type: ToggleType.Switch, isOn: this.deepSleepAfterSend })
-            .onChange((on: boolean) => {
-              this.deepSleepAfterSend = on;
-            })
-        }.width('100%')
-        Text('深睡后需按设备按键唤醒才能再次连接。')
+        Text('本设备没有可用的唤醒源，深睡 (0x92) 已禁用。')
           .fontSize(11)
           .fontColor('#999999')
         Row({ space: 8 }) {

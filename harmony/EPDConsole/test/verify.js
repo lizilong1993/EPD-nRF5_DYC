@@ -1,5 +1,8 @@
 const fs=require('fs'),vm=require('vm'),path=require('path');
-const src=fs.readFileSync('../../../html/js/dithering.js','utf8');
+// Repository layout, or the standalone App checkout beside epd-pr.
+const repoWeb=path.resolve(__dirname,'../../../html/js/dithering.js');
+const standaloneWeb=path.resolve(__dirname,'../../epd-pr/html/js/dithering.js');
+const src=fs.readFileSync(fs.existsSync(repoWeb)?repoWeb:standaloneWeb,'utf8');
 function runWeb(data,w,h,alg,strength,contrast,mode){
   const ctx={Math,Uint8Array,Uint8ClampedArray,console};
   vm.createContext(ctx);
@@ -18,7 +21,8 @@ function runWeb(data,w,h,alg,strength,contrast,mode){
   let pass=0,fail=0;
   for(const mode of modes)for(const alg of algs){
     const work=new Uint8ClampedArray(rgba);
-    D.adjustContrast(work,1.2);
+    const opt=new D.ProcessOptions(); opt.contrast=1.2;
+    D.applyImageTone(work,opt);
     D.ditherImage(w,h,work,alg,1.0,mode);
     const mine=D.packImage(work,w,h,mode);
     const web=runWeb(rgba,w,h,alg,1.0,1.2,mode);
@@ -27,6 +31,7 @@ function runWeb(data,w,h,alg,strength,contrast,mode){
     if(same){pass++;}else{fail++;console.log('MISMATCH',mode,alg,'mine',mine?mine.length:null,'web',web.length);}
   }
   console.log('RESULT pass='+pass+' fail='+fail);
+  if(fail) throw new Error('Web parity failed');
   // protocol checks
   const P=await import('./Protocol.mts');
   const block=P.buildBlockFrame(1,300,0xF0|0x0F,new Uint8Array([1,2,3,4]));
