@@ -153,6 +153,7 @@ struct Firmware {
       this.status = text + ' ' + Math.round(pct * 100) + '%';
     };
     try {
+      this.log('升级流程 DFU-DISCONNECT-WAIT：等待设备断开后扫描');
       const pre: DfuScanResult[] = await client.scan(DFU_SERVICE_UUID, 4000, DFU_ADV_NAME);
       this.inBootloader = pre.length > 0;
       if (this.inBootloader) {
@@ -177,8 +178,9 @@ struct Firmware {
         }
         this.log('按官方流程：不配对，开启 indication 后写入 0x01');
         await client.writeButtonless();
+        this.status = '等待设备重启断开连接...';
+        await client.waitForDeviceDisconnect();
         client.disconnect();
-        this.inBootloader = true;
         this.log('等待 DfuTarg 广播...');
         await this.delay(800);
       }
@@ -186,6 +188,7 @@ struct Firmware {
       for (let attempt: number = 0; attempt < 6 && dfu === null; attempt++) {
         this.status = '扫描 DFU 设备...';
         const list: DfuScanResult[] = await client.scan(DFU_SERVICE_UUID, 5000, DFU_ADV_NAME);
+        this.log('DFU 扫描 ' + (attempt + 1) + '/6：发现 ' + list.length + ' 个候选');
         for (let i: number = 0; i < list.length; i++) {
           if (list[i].name.indexOf('Dfu') >= 0) {
             dfu = list[i];
@@ -202,6 +205,7 @@ struct Firmware {
       if (dfu === null) {
         throw new Error('未发现 DFU 设备（DfuTarg）。设备可能未成功进入 bootloader，请重试');
       }
+      this.inBootloader = true;
       this.log('连接 DFU ' + dfu.name + ' (' + dfu.deviceId + ')');
       await client.connect(dfu.deviceId);
       if (!client.hasDfuService()) {

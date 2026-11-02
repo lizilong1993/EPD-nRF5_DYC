@@ -248,6 +248,10 @@ export class DfuClient {
     this.mtuPayload = 20;
     this.disconnected = false;
     dev.on('BLEConnectionStateChange', (s: ble.BLEConnectionChangeState) => {
+      if (this.device !== dev) {
+        return;
+      }
+      this.onLog('GATT 连接状态事件: ' + s.state);
       if (s.state === constant.ProfileConnectionState.STATE_CONNECTED) {
         if (this.connectedWaiter !== null) {
           const w = this.connectedWaiter;
@@ -456,7 +460,21 @@ export class DfuClient {
     if (resp[2] !== RESULT_SUCCESS) {
       throw new Error('设备拒绝进入 DFU（result=' + resultName(resp[2]) + '）');
     }
-    this.onLog('设备已确认进入 DFU（0x20 0x01 0x01）');
+    this.onLog('设备已接受进入 DFU 请求（0x20 0x01 0x01），尚未确认 bootloader');
+  }
+
+  async waitForDeviceDisconnect(timeoutMs: number = 15000): Promise<void> {
+    const started: number = Date.now();
+    this.onLog('等待设备主动断开，最多 ' + timeoutMs + ' 毫秒');
+    // Keep GATT alive so the stack can confirm the indication before the
+    // peripheral finishes its buttonless transition and resets.
+    while (!this.disconnected && Date.now() - started < timeoutMs) {
+      await this.delay(50);
+    }
+    if (!this.disconnected) {
+      throw new Error('设备在 ' + timeoutMs + ' 毫秒内未主动断开，尚未确认进入 bootloader');
+    }
+    this.onLog('已收到设备断开事件，等待 ' + (Date.now() - started) + ' 毫秒；仍需扫描确认 DFU');
   }
 
   private onNotify(d: Uint8Array): void {
@@ -684,6 +702,7 @@ export class DfuClient {
 
   disconnect(): void {
     const dev = this.device;
+    const wasDisconnected: boolean = this.disconnected;
     this.device = null;
     this.control = null;
     this.packet = null;
@@ -695,8 +714,14 @@ export class DfuClient {
     this.indicationQueue = [];
     this.disconnected = true;
     if (dev !== null) {
+      if (!wasDisconnected) {
+        this.onLog('主动断开 GATT 连接（清理）');
+        try {
+          dev.disconnect();
+        } catch (err) {
+        }
+      }
       try {
-        dev.disconnect();
         dev.close();
       } catch (err) {
       }
