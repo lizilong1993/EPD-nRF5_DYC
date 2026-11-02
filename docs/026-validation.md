@@ -68,3 +68,7 @@ App buttonless 策略：收到 `20 01 01` 仅记录请求已接受；最多等�
 用户完全断电约 30 秒后重新上电，仍报告快速连续闪灯。Windows 独立主动扫描 75 秒（覆盖 60 秒广播周期）收到 965 个广播包、34 个设备，目标数 0。原始输出：epd-deliver-026/logs/pc-coldboot-026-scan.log。当前没有找到应用或 DFU 的无线恢复入口，不能宣称冷启动可恢复；也没有硬件测量证明主板损坏。有线恢复可能需要 SWD，实际 bootloader/UICR/settings 与错误状态尚未读取。
 
 原厂应用镜像恢复候选包已在本机 epd-recovery 准备，尚未刷入：应用 BIN 与 7.5 寸 V2.0.1 厂商包逐字节一致，56,228 字节。init fw_version 使用 0x26，与本次版本计数相同；应用内读回版本仍为厂商 0x19。此包不是完整烧录 HEX，也不能解决缺少 bootloader 通信入口的问题。ZIP SHA256：6873b1de5aff948dbc85a82ccf7e62be36c70e707d3c6c8401c114f60f28835f。
+
+## 源码与二进制定位结果
+
+已确认日历/时钟模式的 Limited 标志与无限广播时长为不合法组合；当前配置默认回退路径可进入该模式。实际启动错误码和运行模式尚未读取，不能将静态条件链直接当作本机运行时根因。详细取证、替代假设与排除项见 [026-incident-analysis.md](026-incident-analysis.md)，给维修方的短说明见 [026-repair-handoff.md](026-repair-handoff.md)。本轮未修改生产源码，未生成新的试验固件。
