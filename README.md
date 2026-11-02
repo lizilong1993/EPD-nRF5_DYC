@@ -125,6 +125,6 @@ node node_modules/@ohos/hvigor/bin/hvigor.js assembleHap --mode module \
 
 ## 0x26 修正状态（2026-11-02）
 
-当前目标固件为 **0x26**。buttonless 的关闭 SoftDevice 回调已改为进入 DFU；正常深睡保持关机。在役 **0x20 必须先用 SWD/编程器烧入修正版一次**，之后才能验证按钮式 OTA。尚未连接硬件完成烧录、DfuTarg 广播及升级后验收。
+当前目标固件为 **0x26**。buttonless 的 SoftDevice-disabled 观察者已改用进入 DFU；正常深睡保持关机。但 SDK 的正常 buttonless 流程本身请求 `GOTO_DFU`，尚无证据证明该观察者导致实机故障，之前“0x20 必须先 SWD 烧入”的结论撤回。手机日志仅确认设备接受请求，随后手机立即断连且扫描未发现 DfuTarg；优先检查响应后 `client.disconnect()` 的时序，再区分 HVC 确认、复位与扫描问题。当前 USB 手机已连接，无 SWD 调试器；SWD 为备用恢复方案，OTA 和升级后验收仍待完成。
 
 App 1.0.2 的新构建恢复 DfuTarg 服务与名称过滤，并包含三色 Web 算法、预览 R/B 修正及亮度/伽马/饱和度步进；默认亮度/伽马/饱和度为 0/1/1。构建、包校验与待实测项目见 [0x26 验收记录](docs/026-validation.md)。
